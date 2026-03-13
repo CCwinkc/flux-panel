@@ -1382,23 +1382,18 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     }
 
 
-    public void updateForwardA(Forward forward) {
+    public R updateForwardA(Forward forward) {
         Tunnel tunnel = validateTunnel(forward.getTunnelId());
         if (tunnel == null) {
-            return;
+            return R.err("隧道不存在");
         }
         UserTunnel userTunnel = getUserTunnel(forward.getUserId(), tunnel.getId().intValue());
         NodeInfo nodeInfo = getRequiredNodes(tunnel);
         if (nodeInfo.isHasError()) {
-            return;
+            return R.err(nodeInfo.getErrorMessage());
         }
-        Integer limiter;
-        if (userTunnel == null) {
-            limiter = null;
-        } else {
-            limiter = userTunnel.getSpeedId();
-        }
-        updateGostServices(forward, tunnel, limiter, nodeInfo, userTunnel);
+        Integer limiter = userTunnel == null ? null : userTunnel.getSpeedId();
+        return updateGostServices(forward, tunnel, limiter, nodeInfo, userTunnel);
     }
 
 

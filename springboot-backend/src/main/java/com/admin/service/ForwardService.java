@@ -81,5 +81,5 @@ public interface ForwardService extends IService<Forward> {
     R updateForwardOrder(Map<String, Object> params);
 
 
-    void updateForwardA(Forward forward);
+    R updateForwardA(Forward forward);
 }

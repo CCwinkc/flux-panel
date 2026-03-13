@@ -1,18 +1,12 @@
 package com.admin.common.utils;
 
 
-import com.admin.common.dto.GostConfigDto;
 import com.admin.common.dto.GostDto;
-import com.admin.common.task.CheckGostConfigAsync;
-import com.admin.entity.Forward;
+import com.admin.common.task.NodeRuleSyncService;
 import com.admin.entity.Node;
-import com.admin.entity.Tunnel;
-import com.admin.service.ForwardService;
 import com.admin.service.NodeService;
-import com.admin.service.TunnelService;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -22,7 +16,6 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import javax.annotation.Resource;
-import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
@@ -38,10 +31,7 @@ public class WebSocketServer extends TextWebSocketHandler {
     NodeService nodeService;
 
     @Resource
-    ForwardService forwardService;
-
-    @Resource
-    TunnelService tunnelService;
+    NodeRuleSyncService nodeRuleSyncService;
 
     // 存储所有活跃的 WebSocket 连接（
     private static final CopyOnWriteArraySet<WebSocketSession> activeSessions = new CopyOnWriteArraySet<>();
@@ -293,8 +283,8 @@ public class WebSocketServer extends TextWebSocketHandler {
                         res.put("data", 1);
                         broadcastMessage(res.toJSONString());
 
-                        // 自动同步规则到新上线的节点
-                        syncRulesToNode(nodeId);
+                        // 节点刚上线时延迟重试补发规则，避免安装后首次连接时本地配置尚未就绪
+                        nodeRuleSyncService.scheduleNodeRuleSync(nodeId);
                     } else {
                         log.info("节点 {} 状态更新失败", nodeId);
                     }
@@ -445,71 +435,6 @@ public class WebSocketServer extends TextWebSocketHandler {
     public static void broadcastMessage(String message) {
         for (WebSocketSession session : activeSessions) {
             sendToUser(session, message);
-        }
-    }
-
-    /**
-     * 同步规则到指定节点
-     * 当节点上线时自动调用，将数据库中所有与该节点相关的转发规则下发到节点
-     */
-    private void syncRulesToNode(Long nodeId) {
-        try {
-            log.info("开始同步规则到节点 {}", nodeId);
-            
-            // 1. 获取节点作为入口节点的所有隧道
-            List<Tunnel> inTunnels = tunnelService.list(new QueryWrapper<Tunnel>().eq("in_node_id", nodeId));
-            // 2. 获取节点作为出口节点的所有隧道
-            List<Tunnel> outTunnels = tunnelService.list(new QueryWrapper<Tunnel>().eq("out_node_id", nodeId));
-            
-            int syncCount = 0;
-            
-            // 3. 处理入口节点的转发规则
-            for (Tunnel tunnel : inTunnels) {
-                List<Forward> forwards = forwardService.list(
-                    new QueryWrapper<Forward>()
-                        .eq("tunnel_id", tunnel.getId())
-                        .eq("status", 1)  // 只同步状态为启用的转发
-                );
-                
-                for (Forward forward : forwards) {
-                    try {
-                        // 使用 updateForwardA 方法重新下发规则
-                        forwardService.updateForwardA(forward);
-                        syncCount++;
-                        log.info("已同步转发规则 {} 到节点 {}", forward.getId(), nodeId);
-                    } catch (Exception e) {
-                        log.error("同步转发规则 {} 到节点 {} 失败: {}", forward.getId(), nodeId, e.getMessage());
-                    }
-                }
-            }
-            
-            // 4. 处理出口节点的转发规则（隧道转发类型）
-            for (Tunnel tunnel : outTunnels) {
-                // 只有隧道转发类型才需要在出口节点配置
-                if (tunnel.getType() != null && tunnel.getType() != 1) {
-                    List<Forward> forwards = forwardService.list(
-                        new QueryWrapper<Forward>()
-                            .eq("tunnel_id", tunnel.getId())
-                            .eq("status", 1)  // 只同步状态为启用的转发
-                    );
-                    
-                    for (Forward forward : forwards) {
-                        try {
-                            // 使用 updateForwardA 方法重新下发规则
-                            forwardService.updateForwardA(forward);
-                            syncCount++;
-                            log.info("已同步出口转发规则 {} 到节点 {}", forward.getId(), nodeId);
-                        } catch (Exception e) {
-                            log.error("同步出口转发规则 {} 到节点 {} 失败: {}", forward.getId(), nodeId, e.getMessage());
-                        }
-                    }
-                }
-            }
-            
-            log.info("节点 {} 规则同步完成，共同步 {} 条规则", nodeId, syncCount);
-            
-        } catch (Exception e) {
-            log.error("同步规则到节点 {} 时发生异常: {}", nodeId, e.getMessage(), e);
         }
     }
 
