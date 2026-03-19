@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 public class NodeRuleSyncService {
 
     private static final int FORWARD_STATUS_ACTIVE = 1;
+    private static final int FORWARD_STATUS_ERROR = -1;
     private static final int SPEED_LIMIT_STATUS_ACTIVE = 1;
     private static final int TUNNEL_TYPE_PORT_FORWARD = 1;
     private static final String GOST_SUCCESS_MSG = "OK";
@@ -141,7 +142,7 @@ public class NodeRuleSyncService {
             List<Forward> forwards = forwardService.list(
                     new QueryWrapper<Forward>()
                             .eq("tunnel_id", tunnel.getId())
-                            .eq("status", FORWARD_STATUS_ACTIVE)
+                            .in("status", FORWARD_STATUS_ACTIVE, FORWARD_STATUS_ERROR)
             );
 
             for (Forward forward : forwards) {

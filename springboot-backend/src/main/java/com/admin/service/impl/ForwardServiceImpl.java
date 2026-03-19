@@ -1019,19 +1019,23 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
      * 更新Gost服务
      */
     private R updateGostServices(Forward forward, Tunnel tunnel, Integer limiter, NodeInfo nodeInfo, UserTunnel userTunnel) {
+        return updateGostServices(forward, tunnel, limiter, nodeInfo, userTunnel, true);
+    }
+
+    private R updateGostServices(Forward forward, Tunnel tunnel, Integer limiter, NodeInfo nodeInfo, UserTunnel userTunnel, boolean markErrorOnFailure) {
         String serviceName = buildServiceName(forward.getId(), forward.getUserId(), userTunnel);
 
         // 隧道转发需要更新链和远程服务
         if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD) {
             R chainResult = updateChainService(nodeInfo.getInNode(), serviceName, tunnel.getOutIp(), forward.getOutPort(), tunnel.getProtocol(), tunnel.getInterfaceName());
             if (chainResult.getCode() != 0) {
-                updateForwardStatusToError(forward);
+                handleForwardSyncFailure(forward, markErrorOnFailure);
                 return chainResult;
             }
 
             R remoteResult = updateRemoteService(nodeInfo.getOutNode(), serviceName, forward, tunnel.getProtocol(), forward.getInterfaceName());
             if (remoteResult.getCode() != 0) {
-                updateForwardStatusToError(forward);
+                handleForwardSyncFailure(forward, markErrorOnFailure);
                 return remoteResult;
             }
         }
@@ -1043,7 +1047,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         // 更新主服务
         R serviceResult = updateMainService(nodeInfo.getInNode(), serviceName, forward, limiter, tunnel.getType(), tunnel, forward.getStrategy(), interfaceName);
         if (serviceResult.getCode() != 0) {
-            updateForwardStatusToError(forward);
+            handleForwardSyncFailure(forward, markErrorOnFailure);
             return serviceResult;
         }
 
@@ -1229,8 +1233,31 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
      * 更新转发状态为错误
      */
     private void updateForwardStatusToError(Forward forward) {
+        Forward statusUpdate = new Forward();
+        statusUpdate.setId(forward.getId());
+        statusUpdate.setStatus(FORWARD_STATUS_ERROR);
+        statusUpdate.setUpdatedTime(System.currentTimeMillis());
+        this.updateById(statusUpdate);
         forward.setStatus(FORWARD_STATUS_ERROR);
-        this.updateById(forward);
+    }
+
+    private void handleForwardSyncFailure(Forward forward, boolean markErrorOnFailure) {
+        if (markErrorOnFailure) {
+            updateForwardStatusToError(forward);
+        }
+    }
+
+    private void restoreForwardStatusToActive(Forward forward) {
+        if (Objects.equals(forward.getStatus(), FORWARD_STATUS_ACTIVE)) {
+            return;
+        }
+
+        Forward statusUpdate = new Forward();
+        statusUpdate.setId(forward.getId());
+        statusUpdate.setStatus(FORWARD_STATUS_ACTIVE);
+        statusUpdate.setUpdatedTime(System.currentTimeMillis());
+        this.updateById(statusUpdate);
+        forward.setStatus(FORWARD_STATUS_ACTIVE);
     }
 
     /**
@@ -1393,7 +1420,11 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             return R.err(nodeInfo.getErrorMessage());
         }
         Integer limiter = userTunnel == null ? null : userTunnel.getSpeedId();
-        return updateGostServices(forward, tunnel, limiter, nodeInfo, userTunnel);
+        R syncResult = updateGostServices(forward, tunnel, limiter, nodeInfo, userTunnel, false);
+        if (syncResult.getCode() == 0) {
+            restoreForwardStatusToActive(forward);
+        }
+        return syncResult;
     }
 
 
