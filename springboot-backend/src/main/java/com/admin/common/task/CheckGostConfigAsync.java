@@ -51,7 +51,6 @@ public class CheckGostConfigAsync {
             cleanOrphanedServices(gostConfig, node);
             cleanOrphanedChains(gostConfig, node);
             cleanOrphanedLimiters(gostConfig, node);
-            nodeRuleSyncService.scheduleNodeRuleSync(node.getId(), 0L, 5000L);
         }
     }
 

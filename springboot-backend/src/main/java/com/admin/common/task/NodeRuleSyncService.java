@@ -35,7 +35,7 @@ public class NodeRuleSyncService {
     private static final int TUNNEL_TYPE_PORT_FORWARD = 1;
     private static final String GOST_SUCCESS_MSG = "OK";
     private static final String GOST_NOT_FOUND_MSG = "not found";
-    private static final long[] DEFAULT_RETRY_DELAYS_MS = {0L, 5000L, 15000L};
+    private static final long[] DEFAULT_RETRY_DELAYS_MS = {0L, 5000L, 15000L, 30000L, 60000L};
 
     @Resource
     @Lazy
@@ -150,7 +150,7 @@ public class NodeRuleSyncService {
                     continue;
                 }
 
-                R syncResult = forwardService.updateForwardA(forward);
+                R syncResult = forwardService.syncForwardForNode(forward, nodeId);
                 if (syncResult.getCode() == 0) {
                     syncedCount++;
                 } else {

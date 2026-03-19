@@ -1160,6 +1160,34 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         return R.ok();
     }
 
+    private R recreateMainServiceOnNode(Node inNode, String serviceName, Forward forward, Integer limiter, Tunnel tunnel) {
+        GostDto deleteResult = GostUtil.DeleteService(inNode.getId(), serviceName);
+        if (!isGostOperationSuccessOrNotFound(deleteResult)) {
+            return R.err(deleteResult.getMsg());
+        }
+
+        String interfaceName = tunnel.getType() != TUNNEL_TYPE_TUNNEL_FORWARD ? forward.getInterfaceName() : null;
+        return createMainService(inNode, serviceName, forward, limiter, tunnel.getType(), tunnel, forward.getStrategy(), interfaceName);
+    }
+
+    private R recreateChainServiceOnNode(Node inNode, String serviceName, Tunnel tunnel, Forward forward) {
+        GostDto deleteResult = GostUtil.DeleteChains(inNode.getId(), serviceName);
+        if (!isGostOperationSuccessOrNotFound(deleteResult)) {
+            return R.err(deleteResult.getMsg());
+        }
+
+        return createChainService(inNode, serviceName, tunnel.getOutIp(), forward.getOutPort(), tunnel.getProtocol(), tunnel.getInterfaceName());
+    }
+
+    private R recreateRemoteServiceOnNode(Node outNode, String serviceName, Forward forward, Tunnel tunnel) {
+        GostDto deleteResult = GostUtil.DeleteRemoteService(outNode.getId(), serviceName);
+        if (!isGostOperationSuccessOrNotFound(deleteResult)) {
+            return R.err(deleteResult.getMsg());
+        }
+
+        return createRemoteService(outNode, serviceName, forward, tunnel.getProtocol(), forward.getInterfaceName());
+    }
+
     /**
      * 创建链服务
      */
@@ -1280,7 +1308,11 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
      * 检查Gost操作是否成功
      */
     private boolean isGostOperationSuccess(GostDto gostResult) {
-        return Objects.equals(gostResult.getMsg(), GOST_SUCCESS_MSG);
+        return gostResult != null && Objects.equals(gostResult.getMsg(), GOST_SUCCESS_MSG);
+    }
+
+    private boolean isGostOperationSuccessOrNotFound(GostDto gostResult) {
+        return gostResult != null && (Objects.equals(gostResult.getMsg(), GOST_SUCCESS_MSG) || gostResult.getMsg().contains(GOST_NOT_FOUND_MSG));
     }
 
 
@@ -1409,6 +1441,60 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     }
 
 
+    @Override
+    public R syncForwardForNode(Forward forward, Long nodeId) {
+        Tunnel tunnel = validateTunnel(forward.getTunnelId());
+        if (tunnel == null) {
+            return R.err("隧道不存在");
+        }
+
+        UserTunnel userTunnel = getUserTunnel(forward.getUserId(), tunnel.getId().intValue());
+        String serviceName = buildServiceName(forward.getId(), forward.getUserId(), userTunnel);
+        Integer limiter = userTunnel == null ? null : userTunnel.getSpeedId();
+        boolean handled = false;
+
+        if (Objects.equals(nodeId, tunnel.getInNodeId())) {
+            Node inNode = nodeService.getById(tunnel.getInNodeId());
+            if (inNode == null) {
+                return R.err("入口节点不存在");
+            }
+
+            if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD) {
+                R chainResult = recreateChainServiceOnNode(inNode, serviceName, tunnel, forward);
+                if (chainResult.getCode() != 0) {
+                    return chainResult;
+                }
+            }
+
+            R mainResult = recreateMainServiceOnNode(inNode, serviceName, forward, limiter, tunnel);
+            if (mainResult.getCode() != 0) {
+                return mainResult;
+            }
+            handled = true;
+        }
+
+        if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD && Objects.equals(nodeId, tunnel.getOutNodeId())) {
+            Node outNode = nodeService.getById(tunnel.getOutNodeId());
+            if (outNode == null) {
+                return R.err("出口节点不存在");
+            }
+
+            R remoteResult = recreateRemoteServiceOnNode(outNode, serviceName, forward, tunnel);
+            if (remoteResult.getCode() != 0) {
+                return remoteResult;
+            }
+            handled = true;
+        }
+
+        if (!handled) {
+            return R.err("节点与转发不匹配");
+        }
+
+        restoreForwardStatusToActive(forward);
+        return R.ok();
+    }
+
+    @Override
     public R updateForwardA(Forward forward) {
         Tunnel tunnel = validateTunnel(forward.getTunnelId());
         if (tunnel == null) {
