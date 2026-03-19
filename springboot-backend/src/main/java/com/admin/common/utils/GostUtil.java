@@ -12,6 +12,10 @@ import java.util.Objects;
 
 public class GostUtil {
 
+    private static final String DEFAULT_SELECTOR_STRATEGY = "fifo";
+    private static final int SELECTOR_MAX_FAILS = 3;
+    private static final String SELECTOR_FAIL_TIMEOUT = "30s";
+
 
     public static GostDto AddLimiters(Long node_id, Long name, String speed) {
         JSONObject data = createLimiterData(name, speed);
@@ -91,15 +95,8 @@ public class GostUtil {
             nodes.add(node);
             num ++;
         }
-        if (strategy == null || strategy.equals("")){
-            strategy = "fifo";
-        }
         forwarder.put("nodes", nodes);
-        JSONObject selector = new JSONObject();
-        selector.put("strategy", strategy);
-        selector.put("maxFails", 1);
-        selector.put("failTimeout", "600s");
-        forwarder.put("selector", selector);
+        forwarder.put("selector", createSelector(strategy, nodes.size()));
 
         data.put("forwarder", forwarder);
         JSONArray services = new JSONArray();
@@ -137,15 +134,8 @@ public class GostUtil {
             nodes.add(node);
             num ++;
         }
-        if (strategy == null || strategy.equals("")){
-            strategy = "fifo";
-        }
         forwarder.put("nodes", nodes);
-        JSONObject selector = new JSONObject();
-        selector.put("strategy", strategy);
-        selector.put("maxFails", 1);
-        selector.put("failTimeout", "600s");
-        forwarder.put("selector", selector);
+        forwarder.put("selector", createSelector(strategy, nodes.size()));
 
         data.put("forwarder", forwarder);
         JSONArray services = new JSONArray();
@@ -314,20 +304,20 @@ public class GostUtil {
         }
 
 
-        // 添加限流器配置
+        // Attach limiter when the rule has a speed cap.
         if (limiter != null) {
             service.put("limiter", limiter.toString());
         }
 
-        // 配置处理器
+        // Configure the protocol handler.
         JSONObject handler = createHandler(protocol, name, fow_type);
         service.put("handler", handler);
 
-        // 配置监听器
+        // Configure the listener.
         JSONObject listener = createListener(protocol);
         service.put("listener", listener);
 
-        // 端口转发需要配置转发器
+        // Port forwarding rules need a forwarder section.
         if (isPortForwarding(fow_type)) {
             JSONObject forwarder = createForwarder(remoteAddr, strategy);
             service.put("forwarder", forwarder);
@@ -339,7 +329,7 @@ public class GostUtil {
         JSONObject handler = new JSONObject();
         handler.put("type", protocol);
 
-        // 隧道转发需要添加链配置
+        // Tunnel forwarding rules must reference the chain.
         if (isTunnelForwarding(fow_type)) {
             handler.put("chain", name + "_chains");
         }
@@ -372,18 +362,26 @@ public class GostUtil {
             num ++;
         }
 
-        if (strategy == null || strategy.equals("")){
-            strategy = "fifo";
-        }
-
         forwarder.put("nodes", nodes);
-
-        JSONObject selector = new JSONObject();
-        selector.put("strategy", strategy);
-        selector.put("maxFails", 1);
-        selector.put("failTimeout", "600s");
-        forwarder.put("selector", selector);
+        forwarder.put("selector", createSelector(strategy, nodes.size()));
         return forwarder;
+    }
+
+    private static JSONObject createSelector(String strategy, int nodeCount) {
+        JSONObject selector = new JSONObject();
+        selector.put("strategy", normalizeStrategy(strategy));
+        if (nodeCount > 1) {
+            selector.put("maxFails", SELECTOR_MAX_FAILS);
+            selector.put("failTimeout", SELECTOR_FAIL_TIMEOUT);
+        }
+        return selector;
+    }
+
+    private static String normalizeStrategy(String strategy) {
+        if (StringUtils.isBlank(strategy)) {
+            return DEFAULT_SELECTOR_STRATEGY;
+        }
+        return strategy;
     }
 
     private static boolean isPortForwarding(Integer fow_type) {
