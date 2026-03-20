@@ -1,11 +1,18 @@
 package com.admin.common.task;
 
-import com.admin.common.dto.*;
-import com.admin.common.lang.R;
+import com.admin.common.dto.ConfigItem;
+import com.admin.common.dto.GostConfigDto;
 import com.admin.common.utils.GostUtil;
-import com.admin.entity.*;
-import com.admin.service.*;
-import com.alibaba.fastjson.JSONObject;
+import com.admin.entity.Forward;
+import com.admin.entity.Node;
+import com.admin.entity.SpeedLimit;
+import com.admin.entity.Tunnel;
+import com.admin.entity.UserTunnel;
+import com.admin.service.ForwardService;
+import com.admin.service.NodeService;
+import com.admin.service.SpeedLimitService;
+import com.admin.service.TunnelService;
+import com.admin.service.UserTunnelService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
@@ -14,12 +21,24 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
 public class CheckGostConfigAsync {
+
+    private static final int FORWARD_STATUS_ACTIVE = 1;
+    private static final int FORWARD_STATUS_ERROR = -1;
+    private static final int SPEED_LIMIT_STATUS_ACTIVE = 1;
+    private static final int TUNNEL_TYPE_TUNNEL_FORWARD = 2;
+    private static final long REPAIR_SYNC_COOLDOWN_MS = 120_000L;
+    private static final ConcurrentHashMap<Long, Long> LAST_REPAIR_SYNC_AT = new ConcurrentHashMap<>();
 
     @Resource
     private NodeService nodeService;
@@ -37,26 +56,25 @@ public class CheckGostConfigAsync {
     private TunnelService tunnelService;
 
     @Resource
+    @Lazy
+    private UserTunnelService userTunnelService;
+
+    @Resource
     private NodeRuleSyncService nodeRuleSyncService;
 
-
-    /**
-     * 清理孤立的Gost配置项
-     */
     @Async
-    public void cleanNodeConfigs(String node_id, GostConfigDto gostConfig) {
-        System.out.println(JSONObject.toJSONString(gostConfig));
-        Node node = nodeService.getById(node_id);
-        if (node != null) {
-            cleanOrphanedServices(gostConfig, node);
-            cleanOrphanedChains(gostConfig, node);
-            cleanOrphanedLimiters(gostConfig, node);
+    public void cleanNodeConfigs(String nodeId, GostConfigDto gostConfig) {
+        Node node = nodeService.getById(nodeId);
+        if (node == null) {
+            return;
         }
+
+        cleanOrphanedServices(gostConfig, node);
+        cleanOrphanedChains(gostConfig, node);
+        cleanOrphanedLimiters(gostConfig, node);
+        triggerRepairSyncIfMissing(gostConfig, node);
     }
 
-    /**
-     * 清理孤立的服务
-     */
     private void cleanOrphanedServices(GostConfigDto gostConfig, Node node) {
         if (gostConfig.getServices() == null) {
             return;
@@ -64,142 +82,227 @@ public class CheckGostConfigAsync {
 
         for (ConfigItem service : gostConfig.getServices()) {
             safeExecute(() -> {
-
-                if (!Objects.equals(service.getName(), "web_api")){
-                    String[] serviceIds = parseServiceName(service.getName());
-                    if (serviceIds.length == 4) {
-                        String forwardId = serviceIds[0];
-                        String userId = serviceIds[1];
-                        String userTunnelId = serviceIds[2];
-                        String type = serviceIds[3];
-
-                        if (Objects.equals(type, "tcp")) { // 只处理TCP，避免重复处理
-                            Forward forward = forwardService.getById(forwardId);
-                            if (forward == null) {
-                                log.info("删除孤立的服务: {} (节点: {})", service.getName(), node.getId());
-                                GostDto gostDto = GostUtil.DeleteService(node.getId(), forwardId + "_" + userId + "_" + userTunnelId);
-                                System.out.println(gostDto);
-                            }
-                        }
-
-
-                        if (Objects.equals(type, "tls")) {
-                            Forward forward = forwardService.getById(forwardId);
-                            if (forward == null) {
-                                log.info("删除孤立的服务: {} (节点: {})", service.getName(), node.getId());
-                                GostUtil.DeleteRemoteService(node.getId(), forwardId+"_"+userId+"_"+userTunnelId);
-                            }
-                        }
-
-                    }
+                if (Objects.equals(service.getName(), "web_api")) {
+                    return;
                 }
 
+                String[] serviceIds = parseServiceName(service.getName());
+                if (serviceIds.length != 4) {
+                    return;
+                }
 
+                String forwardId = serviceIds[0];
+                String userId = serviceIds[1];
+                String userTunnelId = serviceIds[2];
+                String type = serviceIds[3];
+                Forward forward = forwardService.getById(forwardId);
+                if (forward != null) {
+                    return;
+                }
+
+                if (Objects.equals(type, "tcp")) {
+                    log.info("删除孤立服务 {} (节点: {})", service.getName(), node.getId());
+                    GostUtil.DeleteService(node.getId(), forwardId + "_" + userId + "_" + userTunnelId);
+                    return;
+                }
+
+                if (Objects.equals(type, "tls")) {
+                    log.info("删除孤立远程服务 {} (节点: {})", service.getName(), node.getId());
+                    GostUtil.DeleteRemoteService(node.getId(), forwardId + "_" + userId + "_" + userTunnelId);
+                }
             }, "清理服务 " + service.getName());
         }
-
     }
 
-    /**
-     * 清理孤立的链
-     */
     private void cleanOrphanedChains(GostConfigDto gostConfig, Node node) {
         if (gostConfig.getChains() == null) {
             return;
         }
-        
 
         for (ConfigItem chain : gostConfig.getChains()) {
             safeExecute(() -> {
                 String[] serviceIds = parseServiceName(chain.getName());
-                if (serviceIds.length == 4) {
-                    String forwardId = serviceIds[0];
-                    String userId = serviceIds[1];
-                    String userTunnelId = serviceIds[2];
-                    String type = serviceIds[3];
-                    
-                    if (Objects.equals(type, "chains")) {
-                        Forward forward = forwardService.getById(forwardId);
-                        if (forward == null) {
-                            log.info("删除孤立的链: {} (节点: {})", chain.getName(), node.getId());
-                            GostUtil.DeleteChains(node.getId(), forwardId+"_"+userId+"_"+userTunnelId);
-                        }
-                    }
+                if (serviceIds.length != 4 || !Objects.equals(serviceIds[3], "chains")) {
+                    return;
+                }
+
+                Forward forward = forwardService.getById(serviceIds[0]);
+                if (forward == null) {
+                    log.info("删除孤立链 {} (节点: {})", chain.getName(), node.getId());
+                    GostUtil.DeleteChains(node.getId(), serviceIds[0] + "_" + serviceIds[1] + "_" + serviceIds[2]);
                 }
             }, "清理链 " + chain.getName());
         }
     }
 
-    /**
-     * 清理孤立的限流器
-     */
     private void cleanOrphanedLimiters(GostConfigDto gostConfig, Node node) {
         if (gostConfig.getLimiters() == null) {
             return;
         }
-        
 
         for (ConfigItem limiter : gostConfig.getLimiters()) {
             safeExecute(() -> {
                 SpeedLimit speedLimit = speedLimitService.getById(limiter.getName());
                 if (speedLimit == null) {
-                    log.info("删除孤立的限流器: {} (节点: {})", limiter.getName(), node.getId());
+                    log.info("删除孤立限速器 {} (节点: {})", limiter.getName(), node.getId());
                     GostUtil.DeleteLimiters(node.getId(), Long.parseLong(limiter.getName()));
                 }
-            }, "清理限流器 " + limiter.getName());
+            }, "清理限速器 " + limiter.getName());
         }
     }
 
-    /**
-     * 同步限流器
-     */
-    private void syncLimiters(GostConfigDto gostConfig, Node node) {
-        List<Tunnel> tunnelList = tunnelService.list(new QueryWrapper<Tunnel>().eq("in_node_id", node.getId()));
-        if (tunnelList == null || tunnelList.isEmpty()) return;
-        safeExecute(() -> {
-            StringBuilder tunnelIds = new StringBuilder();
-            for (Tunnel tunnel : tunnelList) {
-                tunnelIds.append(tunnel.getId()).append(",");
-            }
-            String ids = tunnelIds.deleteCharAt(tunnelIds.length() - 1).toString();
-            List<SpeedLimit> speedLimits = speedLimitService.list(new QueryWrapper<SpeedLimit>().in("tunnel_id", ids));
-            if (speedLimits != null && !speedLimits.isEmpty()) {
-                List<ConfigItem> limiters = gostConfig.getLimiters();
-                List<Long> limiters_ids = new ArrayList<>();
-                List<Long>  speedLimits_ids = new ArrayList<>();
-                if (limiters != null){
-                    for (ConfigItem limiter : limiters) {
-                        limiters_ids.add(Long.valueOf(limiter.getName()));
-                    }
-                }
-                for (SpeedLimit speedLimit : speedLimits) {
-                    speedLimits_ids.add(speedLimit.getId());
-                }
-                List<Long> diff = new ArrayList<>(speedLimits_ids);
-                diff.removeAll(limiters_ids);
-                System.out.println(diff);
-                if (!diff.isEmpty()) {
+    private void triggerRepairSyncIfMissing(GostConfigDto gostConfig, Node node) {
+        Set<String> currentServices = toNameSet(gostConfig.getServices());
+        Set<String> currentChains = toNameSet(gostConfig.getChains());
+        Set<String> currentLimiters = toNameSet(gostConfig.getLimiters());
 
-                    for (Long speed_id : diff) {
-                        SpeedLimit speedLimit = speedLimitService.getById(speed_id);
-                        if (speedLimit != null) {
-                            SpeedLimitUpdateDto speedLimitUpdateDto = new SpeedLimitUpdateDto();
-                            speedLimitUpdateDto.setId(speed_id);
-                            speedLimitUpdateDto.setName(speedLimit.getName());
-                            speedLimitUpdateDto.setSpeed(speedLimit.getSpeed());
-                            speedLimitUpdateDto.setTunnelId(speedLimit.getTunnelId());
-                            speedLimitUpdateDto.setTunnelName(speedLimit.getTunnelName());
-                            speedLimitService.updateSpeedLimit(speedLimitUpdateDto);
-                        }
-                    }
-                }
-            }
-        }, "同步限流器 ");
+        Set<String> missingServices = findMissingNames(collectExpectedServiceNames(node.getId()), currentServices);
+        Set<String> missingChains = findMissingNames(collectExpectedChainNames(node.getId()), currentChains);
+        Set<String> missingLimiters = findMissingNames(collectExpectedLimiterNames(node.getId()), currentLimiters);
+
+        if (missingServices.isEmpty() && missingChains.isEmpty() && missingLimiters.isEmpty()) {
+            return;
+        }
+
+        if (!shouldTriggerRepairSync(node.getId())) {
+            log.info("节点 {} 仍有缺失配置，但仍在冷却窗口内，跳过补发触发", node.getId());
+            return;
+        }
+
+        log.info(
+                "节点 {} 检测到缺失配置，触发差异补发 services={}, chains={}, limiters={}",
+                node.getId(),
+                missingServices,
+                missingChains,
+                missingLimiters
+        );
+        nodeRuleSyncService.scheduleNodeRuleSync(node.getId(), 1000L, 5000L, 15000L, 30000L, 60000L);
     }
 
-    /**
-     * 安全执行操作，捕获异常
-     */
+    private boolean shouldTriggerRepairSync(Long nodeId) {
+        long now = System.currentTimeMillis();
+        Long lastTriggerAt = LAST_REPAIR_SYNC_AT.get(nodeId);
+        if (lastTriggerAt != null && now - lastTriggerAt < REPAIR_SYNC_COOLDOWN_MS) {
+            return false;
+        }
+        LAST_REPAIR_SYNC_AT.put(nodeId, now);
+        return true;
+    }
+
+    private Set<String> collectExpectedServiceNames(Long nodeId) {
+        Set<String> expectedNames = new HashSet<>();
+        Map<String, Integer> userTunnelCache = new HashMap<>();
+
+        List<Tunnel> inTunnels = tunnelService.list(new QueryWrapper<Tunnel>().eq("in_node_id", nodeId));
+        for (Tunnel tunnel : inTunnels) {
+            for (Forward forward : listSyncableForwards(tunnel.getId())) {
+                String baseName = buildServiceBaseName(forward, tunnel, userTunnelCache);
+                expectedNames.add(baseName + "_tcp");
+                expectedNames.add(baseName + "_udp");
+            }
+        }
+
+        List<Tunnel> outTunnels = tunnelService.list(
+                new QueryWrapper<Tunnel>()
+                        .eq("out_node_id", nodeId)
+                        .eq("type", TUNNEL_TYPE_TUNNEL_FORWARD)
+        );
+        for (Tunnel tunnel : outTunnels) {
+            for (Forward forward : listSyncableForwards(tunnel.getId())) {
+                String baseName = buildServiceBaseName(forward, tunnel, userTunnelCache);
+                expectedNames.add(baseName + "_tls");
+            }
+        }
+
+        return expectedNames;
+    }
+
+    private Set<String> collectExpectedChainNames(Long nodeId) {
+        Set<String> expectedNames = new HashSet<>();
+        Map<String, Integer> userTunnelCache = new HashMap<>();
+
+        List<Tunnel> inTunnels = tunnelService.list(
+                new QueryWrapper<Tunnel>()
+                        .eq("in_node_id", nodeId)
+                        .eq("type", TUNNEL_TYPE_TUNNEL_FORWARD)
+        );
+        for (Tunnel tunnel : inTunnels) {
+            for (Forward forward : listSyncableForwards(tunnel.getId())) {
+                String baseName = buildServiceBaseName(forward, tunnel, userTunnelCache);
+                expectedNames.add(baseName + "_chains");
+            }
+        }
+
+        return expectedNames;
+    }
+
+    private Set<String> collectExpectedLimiterNames(Long nodeId) {
+        Set<String> expectedNames = new HashSet<>();
+        List<Tunnel> inTunnels = tunnelService.list(new QueryWrapper<Tunnel>().eq("in_node_id", nodeId));
+        if (inTunnels.isEmpty()) {
+            return expectedNames;
+        }
+
+        List<Long> tunnelIds = new ArrayList<>();
+        for (Tunnel tunnel : inTunnels) {
+            tunnelIds.add(tunnel.getId());
+        }
+
+        List<SpeedLimit> speedLimits = speedLimitService.list(
+                new QueryWrapper<SpeedLimit>()
+                        .in("tunnel_id", tunnelIds)
+                        .eq("status", SPEED_LIMIT_STATUS_ACTIVE)
+        );
+        for (SpeedLimit speedLimit : speedLimits) {
+            if (speedLimit.getId() != null) {
+                expectedNames.add(String.valueOf(speedLimit.getId()));
+            }
+        }
+
+        return expectedNames;
+    }
+
+    private List<Forward> listSyncableForwards(Long tunnelId) {
+        return forwardService.list(
+                new QueryWrapper<Forward>()
+                        .eq("tunnel_id", tunnelId)
+                        .in("status", FORWARD_STATUS_ACTIVE, FORWARD_STATUS_ERROR)
+        );
+    }
+
+    private String buildServiceBaseName(Forward forward, Tunnel tunnel, Map<String, Integer> userTunnelCache) {
+        String cacheKey = forward.getUserId() + ":" + tunnel.getId();
+        Integer userTunnelId = userTunnelCache.computeIfAbsent(cacheKey, ignored -> {
+            UserTunnel userTunnel = userTunnelService.getOne(
+                    new QueryWrapper<UserTunnel>()
+                            .eq("user_id", forward.getUserId())
+                            .eq("tunnel_id", tunnel.getId())
+            );
+            return userTunnel != null ? userTunnel.getId() : 0;
+        });
+        return forward.getId() + "_" + forward.getUserId() + "_" + userTunnelId;
+    }
+
+    private Set<String> toNameSet(List<ConfigItem> items) {
+        Set<String> names = new HashSet<>();
+        if (items == null) {
+            return names;
+        }
+
+        for (ConfigItem item : items) {
+            if (item != null && item.getName() != null) {
+                names.add(item.getName());
+            }
+        }
+        return names;
+    }
+
+    private Set<String> findMissingNames(Set<String> expectedNames, Set<String> currentNames) {
+        Set<String> missingNames = new HashSet<>(expectedNames);
+        missingNames.removeAll(currentNames);
+        return missingNames;
+    }
+
     private void safeExecute(Runnable operation, String operationDesc) {
         try {
             operation.run();
@@ -208,10 +311,6 @@ public class CheckGostConfigAsync {
         }
     }
 
-
-    /**
-     * 解析服务名称
-     */
     private String[] parseServiceName(String serviceName) {
         return serviceName.split("_");
     }

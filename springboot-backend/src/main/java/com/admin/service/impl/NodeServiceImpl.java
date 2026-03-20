@@ -41,6 +41,8 @@ import org.springframework.beans.factory.annotation.Value;
 @Service
 public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements NodeService {
 
+    private static final String INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/CCwinkc/flux-panel/master/install.sh";
+
     // ========== 常量定义 ==========
     
     /** 节点默认状态：启用 */
@@ -363,7 +365,7 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
         StringBuilder command = new StringBuilder();
         
         // 第一部分：下载安装脚本  
-        command.append("curl -L https://github.com/bqlpfy/flux-panel/releases/download/1.4.3/install.sh")
+        command.append("curl -L ").append(INSTALL_SCRIPT_URL)
                .append(" -o ./install.sh && chmod +x ./install.sh && ");
         
         // 处理服务器地址，如果是IPv6需要添加方括号
